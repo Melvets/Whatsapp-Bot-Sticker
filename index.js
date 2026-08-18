@@ -159,7 +159,7 @@ function buildMemeTextSvg(width, height, topText, bottomText) {
     lines.forEach((line, i) => {
       const y = fontSize + 16 + i * lineHeight;
       const safety = textLengthAttr(line, fontSize);
-      elements += `<text x="${width / 2}" y="${y}"${safety} style="font-family:Arial,Helvetica,sans-serif;font-weight:900;font-size:${fontSize}px;fill:white;stroke:black;stroke-width:${Math.max(1.5, fontSize * strokeRatio)};paint-order:stroke fill;text-anchor:middle;">${escape(line)}</text>`;
+      elements += `<text x="${width / 2}" y="${y}"${safety} style="font-family:serif;font-weight:900;font-size:${fontSize}px;fill:white;stroke:black;stroke-width:${Math.max(1.5, fontSize * strokeRatio)};paint-order:stroke fill;text-anchor:middle;">${escape(line)}</text>`;
     });
   }
 
@@ -169,7 +169,7 @@ function buildMemeTextSvg(width, height, topText, bottomText) {
     lines.forEach((line, i) => {
       const y = height - 16 - totalHeight + (i + 1) * lineHeight;
       const safety = textLengthAttr(line, fontSize);
-      elements += `<text x="${width / 2}" y="${y}"${safety} style="font-family:Arial,Helvetica,sans-serif;font-weight:900;font-size:${fontSize}px;fill:white;stroke:black;stroke-width:${Math.max(1.5, fontSize * strokeRatio)};paint-order:stroke fill;text-anchor:middle;">${escape(line)}</text>`;
+      elements += `<text x="${width / 2}" y="${y}"${safety} style="font-family:serif;font-weight:900;font-size:${fontSize}px;fill:white;stroke:black;stroke-width:${Math.max(1.5, fontSize * strokeRatio)};paint-order:stroke fill;text-anchor:middle;">${escape(line)}</text>`;
     });
   }
 
