@@ -42,7 +42,7 @@ else
   cd Whatsapp-Bot-Sticker
 fi
 
-# --- 3. Patch package.json (hapus @ffmpeg-installer, @hapi/boom sudah ada di Baileys) ---
+# --- 3. Patch package.json (hapus @ffmpeg-installer) ---
 echo ""
 echo "[3/5] Patch package.json untuk Termux..."
 node -e "

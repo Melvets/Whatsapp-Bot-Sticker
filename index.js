@@ -7,9 +7,8 @@ const {
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
-const sharp = require('sharp');
+const Jimp = require('jimp');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const fs = require('fs-extra');
 const path = require('path');
 const webpmux = require('node-webpmux');
@@ -19,7 +18,17 @@ const readline = require('readline');
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const question = (text) => new Promise((resolve) => rl.question(text, resolve));
 
-ffmpeg.setFfmpegPath(ffmpegPath);
+ffmpeg.setFfmpegPath(
+  (() => {
+    try {
+      // Termux / sistem: cari ffmpeg di PATH
+      return require('child_process').execSync('which ffmpeg 2>/dev/null || where ffmpeg 2>nul').toString().trim().split('\n')[0].trim();
+    } catch {
+      // PC Windows fallback: pakai @ffmpeg-installer jika ada
+      try { return require('@ffmpeg-installer/ffmpeg').path; } catch { return 'ffmpeg'; }
+    }
+  })()
+);
 
 // ==== KONFIGURASI ====
 const CONFIG = {
@@ -170,17 +179,49 @@ function buildMemeTextSvg(width, height, topText, bottomText) {
 // ==== KONVERSI GAMBAR KE WEBP (STIKER STATIS) + TEKS OPSIONAL ====
 async function imageToWebpSticker(buffer, topText, bottomText) {
   const size = 512;
-  let image = sharp(buffer).resize(size, size, {
-    fit: 'contain',
-    background: { r: 0, g: 0, b: 0, alpha: 0 },
-  });
+
+  // Load dan resize gambar dengan jimp
+  const image = await Jimp.read(buffer);
+  image.contain(size, size); // fit contain dengan padding transparan
 
   if (topText || bottomText) {
-    const svg = buildMemeTextSvg(size, size, topText, bottomText);
-    image = image.composite([{ input: Buffer.from(svg), gravity: 'center' }]);
+    // Render teks menggunakan jimp font bawaan
+    const font = await Jimp.loadFont(Jimp.FONT_SANS_32_WHITE);
+    const fontSmall = await Jimp.loadFont(Jimp.FONT_SANS_16_WHITE);
+
+    const drawText = async (text, isTop) => {
+      const upper = text.toUpperCase();
+      const textWidth = Jimp.measureText(font, upper);
+      const textHeight = Jimp.measureTextHeight(font, upper, size - 20);
+      const useFont = textWidth > size - 20 ? fontSmall : font;
+      const x = 10;
+      const y = isTop ? 10 : size - textHeight - 10;
+      image.print(useFont, x, y, { text: upper, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER }, size - 20, size);
+    };
+
+    if (topText) await drawText(topText, true);
+    if (bottomText) await drawText(bottomText, false);
   }
 
-  return image.webp({ quality: 80 }).toBuffer();
+  // Konversi ke WebP via buffer PNG → ffmpeg tidak tersedia untuk statis,
+  // jimp tidak support webp output langsung — pakai temp PNG lalu ffmpeg
+  const tmpPng = path.join(CONFIG.tempFolder, `img_${Date.now()}.png`);
+  const tmpWebp = path.join(CONFIG.tempFolder, `img_${Date.now()}.webp`);
+  await image.writeAsync(tmpPng);
+
+  await new Promise((resolve, reject) => {
+    ffmpeg(tmpPng)
+      .outputOptions(['-vcodec', 'libwebp', '-quality', '80'])
+      .toFormat('webp')
+      .save(tmpWebp)
+      .on('end', resolve)
+      .on('error', reject);
+  });
+
+  const result = await fs.readFile(tmpWebp);
+  await fs.remove(tmpPng).catch(() => {});
+  await fs.remove(tmpWebp).catch(() => {});
+  return result;
 }
 
 // ==== KONVERSI VIDEO/GIF KE WEBP ANIMASI + TEKS OPSIONAL ====
@@ -193,14 +234,27 @@ async function videoToWebpSticker(buffer, topText, bottomText) {
 
   await fs.writeFile(inputPath, buffer);
 
-  // ==== Buat overlay PNG dari SVG (sama persis dengan stiker gambar) ====
+  // ==== Buat overlay PNG dari teks dengan jimp ====
   if (topText || bottomText) {
     const size = 512;
-    const svg = buildMemeTextSvg(size, size, topText, bottomText);
-    await sharp(Buffer.from(svg))
-      .resize(size, size)
-      .png()
-      .toFile(overlayPath);
+    // Buat canvas transparan 512x512
+    const overlay = new Jimp(size, size, 0x00000000);
+    const font = await Jimp.loadFont(Jimp.FONT_SANS_32_WHITE);
+    const fontSmall = await Jimp.loadFont(Jimp.FONT_SANS_16_WHITE);
+
+    const drawText = async (text, isTop) => {
+      const upper = text.toUpperCase();
+      const textWidth = Jimp.measureText(font, upper);
+      const textHeight = Jimp.measureTextHeight(font, upper, size - 20);
+      const useFont = textWidth > size - 20 ? fontSmall : font;
+      const y = isTop ? 10 : size - textHeight - 10;
+      overlay.print(useFont, 10, y, { text: upper, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER }, size - 20, size);
+    };
+
+    if (topText) await drawText(topText, true);
+    if (bottomText) await drawText(bottomText, false);
+
+    await overlay.writeAsync(overlayPath);
     hasOverlay = true;
   }
 
