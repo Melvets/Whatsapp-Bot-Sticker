@@ -7,7 +7,6 @@ const {
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
-const { Resvg } = require('@resvg/resvg-js');
 const ffmpeg = require('fluent-ffmpeg');
 const fs = require('fs-extra');
 const path = require('path');
@@ -85,167 +84,52 @@ function checkRateLimit(userId) {
   return { allowed: true };
 }
 
-function wrapText(text, maxCharsPerLine) {
-  const words = text.split(' ');
-  const lines = [];
-  let currentLine = '';
-
-  for (const word of words) {
-    const testLine = currentLine ? `${currentLine} ${word}` : word;
-    if (testLine.length > maxCharsPerLine && currentLine) {
-      lines.push(currentLine);
-      currentLine = word;
-    } else {
-      currentLine = testLine;
-    }
-  }
-  if (currentLine) lines.push(currentLine);
-  return lines;
+// ==== HELPER: escape teks untuk FFmpeg drawtext ====
+function escapeFF(s) {
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/:/g, '\\:')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
 }
 
-function buildMemeTextSvg(width, height, topText, bottomText) {
-  const escape = (s) =>
-    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  // Estimasi lebih konservatif (lebih besar) supaya wrap lebih agresif
-  const charWidthRatio = 0.72;
-  const sidePadding = 24;
-  const usableWidth = width - sidePadding * 2;
-
-  const maxBlockHeight = height * 0.28;
-  const maxFontSize = 48;
-  const minFontSize = 20;
-
-  function renderBlock(text) {
-    let fontSize = maxFontSize;
-    let lines = [];
-    let lineHeight = 0;
-
-    while (fontSize >= minFontSize) {
-      const maxCharsPerLine = Math.floor(usableWidth / (fontSize * charWidthRatio));
-      lines = wrapText(text, maxCharsPerLine);
-      lineHeight = fontSize * 1.15;
-      const blockHeight = lines.length * lineHeight;
-
-      if (lines.length <= 3 && blockHeight <= maxBlockHeight) break;
-      fontSize -= 3;
-    }
-
-    if (lines.length > 3) {
-      const maxCharsPerLine = Math.floor(usableWidth / (fontSize * charWidthRatio));
-      lines = lines.slice(0, 3);
-      lines[2] =
-        lines[2].length > maxCharsPerLine - 3
-          ? lines[2].slice(0, maxCharsPerLine - 3) + '...'
-          : lines[2] + '...';
-    }
-
-    return { lines, fontSize, lineHeight };
-  }
-
-  function textLengthAttr(line, fontSize) {
-    const estimatedWidth = line.length * fontSize * charWidthRatio;
-    if (estimatedWidth > usableWidth) {
-      return ` textLength="${usableWidth}" lengthAdjust="spacingAndGlyphs"`;
-    }
-    return '';
-  }
-
-  let elements = '';
-  const strokeRatio = 0.07;
-
+// ==== HELPER: build drawtext filter untuk teks atas dan bawah ====
+function buildDrawtextFilter(topText, bottomText, extraFilters) {
+  const parts = extraFilters ? [extraFilters] : [];
   if (topText) {
-    const { lines, fontSize, lineHeight } = renderBlock(topText.toUpperCase());
-    lines.forEach((line, i) => {
-      const y = fontSize + 16 + i * lineHeight;
-      const safety = textLengthAttr(line, fontSize);
-      elements += `<text x="${width / 2}" y="${y}"${safety} style="font-family:serif;font-weight:900;font-size:${fontSize}px;fill:white;stroke:black;stroke-width:${Math.max(1.5, fontSize * strokeRatio)};paint-order:stroke fill;text-anchor:middle;">${escape(line)}</text>`;
-    });
+    parts.push(
+      `drawtext=text='${escapeFF(topText.toUpperCase())}':fontcolor=white:fontsize=48:borderw=3:bordercolor=black:x=(w-text_w)/2:y=20:font=serif`
+    );
   }
-
   if (bottomText) {
-    const { lines, fontSize, lineHeight } = renderBlock(bottomText.toUpperCase());
-    const totalHeight = lines.length * lineHeight;
-    lines.forEach((line, i) => {
-      const y = height - 16 - totalHeight + (i + 1) * lineHeight;
-      const safety = textLengthAttr(line, fontSize);
-      elements += `<text x="${width / 2}" y="${y}"${safety} style="font-family:serif;font-weight:900;font-size:${fontSize}px;fill:white;stroke:black;stroke-width:${Math.max(1.5, fontSize * strokeRatio)};paint-order:stroke fill;text-anchor:middle;">${escape(line)}</text>`;
-    });
+    parts.push(
+      `drawtext=text='${escapeFF(bottomText.toUpperCase())}':fontcolor=white:fontsize=48:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-text_h-20:font=serif`
+    );
   }
-
-  return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">${elements}</svg>`;
+  return parts.join(',');
 }
 
-// ==== RENDER SVG KE PNG BUFFER (pakai resvg-js, jalan di ARM64 tanpa compile) ====
-function svgToPng(svgString, width, height) {
-  const resvg = new Resvg(svgString, {
-    fitTo: { mode: 'width', value: width },
-  });
-  const pngData = resvg.render();
-  return pngData.asPng();
-}
-
-// ==== KONVERSI GAMBAR KE WEBP (STIKER STATIS) + TEKS MEME OPSIONAL ====
+// ==== KONVERSI GAMBAR KE WEBP (STIKER STATIS) + TEKS OPSIONAL ====
 async function imageToWebpSticker(buffer, topText, bottomText) {
   const size = 512;
-  const tmpPng = path.join(CONFIG.tempFolder, `img_${Date.now()}.png`);
-  const tmpWebp = path.join(CONFIG.tempFolder, `img_${Date.now()}.webp`);
+  const tmpIn = path.join(CONFIG.tempFolder, `img_in_${Date.now()}`);
+  const tmpWebp = path.join(CONFIG.tempFolder, `img_out_${Date.now()}.webp`);
 
-  // Simpan buffer input sebagai PNG sementara
-  await fs.writeFile(tmpPng, buffer);
+  await fs.writeFile(tmpIn, buffer);
 
-  if (topText || bottomText) {
-    // Render teks meme via SVG → PNG overlay, lalu composite dengan ffmpeg
-    const overlayPath = path.join(CONFIG.tempFolder, `overlay_${Date.now()}.png`);
-    const svg = buildMemeTextSvg(size, size, topText, bottomText);
-    console.log('[DEBUG] topText:', topText, '| bottomText:', bottomText);
-    console.log('[DEBUG] SVG length:', svg.length);
-    try {
-      const pngBuf = svgToPng(svg, size, size);
-      console.log('[DEBUG] PNG overlay size:', pngBuf.length, 'bytes');
-      await fs.writeFile(overlayPath, pngBuf);
-    } catch (e) {
-      console.error('[DEBUG] svgToPng error:', e.message);
-      // Fallback: buat stiker tanpa teks
-      await new Promise((resolve, reject) => {
-        ffmpeg(tmpPng)
-          .outputOptions(['-vcodec', 'libwebp', '-vf', `scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:-1:-1:color=black@0.0`, '-quality', '80'])
-          .toFormat('webp').save(tmpWebp)
-          .on('end', resolve).on('error', reject);
-      });
-      const result = await fs.readFile(tmpWebp);
-      await fs.remove(tmpPng).catch(() => {});
-      await fs.remove(tmpWebp).catch(() => {});
-      return result;
-    }
+  const baseFilter = `scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:-1:-1:color=black@0.0`;
+  const vf = buildDrawtextFilter(topText, bottomText, baseFilter);
 
-    await new Promise((resolve, reject) => {
-      ffmpeg(tmpPng)
-        .input(overlayPath)
-        .outputOptions([
-          '-vcodec', 'libwebp',
-          '-filter_complex', `[0:v]scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:-1:-1:color=black@0.0[base];[1:v]scale=${size}:${size}[txt];[base][txt]overlay=0:0`,
-          '-quality', '80',
-        ])
-        .toFormat('webp').save(tmpWebp)
-        .on('end', resolve).on('error', reject);
-    });
-    await fs.remove(overlayPath).catch(() => {});
-  } else {
-    await new Promise((resolve, reject) => {
-      ffmpeg(tmpPng)
-        .outputOptions([
-          '-vcodec', 'libwebp',
-          '-vf', `scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:-1:-1:color=black@0.0`,
-          '-quality', '80',
-        ])
-        .toFormat('webp').save(tmpWebp)
-        .on('end', resolve).on('error', reject);
-    });
-  }
+  await new Promise((resolve, reject) => {
+    ffmpeg(tmpIn)
+      .outputOptions(['-vcodec', 'libwebp', '-vf', vf, '-quality', '80'])
+      .toFormat('webp').save(tmpWebp)
+      .on('end', resolve).on('error', reject);
+  });
 
   const result = await fs.readFile(tmpWebp);
-  await fs.remove(tmpPng).catch(() => {});
+  await fs.remove(tmpIn).catch(() => {});
   await fs.remove(tmpWebp).catch(() => {});
   return result;
 }
@@ -257,39 +141,22 @@ async function videoToWebpSticker(buffer, topText, bottomText) {
 
   await fs.writeFile(inputPath, buffer);
 
-  // Render teks meme overlay dari SVG jika ada teks
-  let overlayPath = null;
-  if (topText || bottomText) {
-    overlayPath = path.join(CONFIG.tempFolder, `overlay_${Date.now()}.png`);
-    const svg = buildMemeTextSvg(512, 512, topText, bottomText);
-    const pngBuf = svgToPng(svg, 512, 512);
-    await fs.writeFile(overlayPath, pngBuf);
-  }
-
-  function buildBaseFilter(fps) {
-    return `scale=512:512:force_original_aspect_ratio=decrease,fps=${fps},pad=512:512:-1:-1:color=white@0.0`;
+  function buildVideoFilter(fps) {
+    const base = `scale=512:512:force_original_aspect_ratio=decrease,fps=${fps},pad=512:512:-1:-1:color=white@0.0`;
+    return buildDrawtextFilter(topText, bottomText, base);
   }
 
   async function runFfmpeg(fps, quality, duration) {
     await new Promise((resolve, reject) => {
-      const cmd = ffmpeg(inputPath).duration(duration);
-      if (overlayPath) {
-        cmd.input(overlayPath);
-        cmd.outputOptions([
+      ffmpeg(inputPath)
+        .duration(duration)
+        .outputOptions([
           '-vcodec', 'libwebp',
-          '-filter_complex', `[0:v]${buildBaseFilter(fps)}[base];[1:v]scale=512:512[txt];[base][txt]overlay=0:0`,
+          '-vf', buildVideoFilter(fps),
           '-loop', '0', '-preset', 'picture', '-an', '-vsync', '0',
           '-quality', `${quality}`, '-compression_level', '6',
-        ]);
-      } else {
-        cmd.outputOptions([
-          '-vcodec', 'libwebp',
-          '-vf', buildBaseFilter(fps),
-          '-loop', '0', '-preset', 'picture', '-an', '-vsync', '0',
-          '-quality', `${quality}`, '-compression_level', '6',
-        ]);
-      }
-      cmd.toFormat('webp').save(outputPath)
+        ])
+        .toFormat('webp').save(outputPath)
         .on('end', resolve).on('error', reject);
     });
     const stat = await fs.stat(outputPath);
@@ -314,7 +181,6 @@ async function videoToWebpSticker(buffer, topText, bottomText) {
   const outputBuffer = await fs.readFile(outputPath);
   await fs.remove(inputPath).catch(() => {});
   await fs.remove(outputPath).catch(() => {});
-  if (overlayPath) await fs.remove(overlayPath).catch(() => {});
 
   if (finalSize > maxSizeBytes) {
     console.warn(`⚠️ Stiker ${(finalSize / 1024).toFixed(0)}KB, batasnya 500KB loh ya cik 😹`);

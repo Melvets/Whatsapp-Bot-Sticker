@@ -9,7 +9,6 @@
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@hapi/boom": "^10.0.1",
-    "@resvg/resvg-js": "^2.6.2",
     "@whiskeysockets/baileys": "^6.7.18",
     "fluent-ffmpeg": "^2.1.2",
     "fs-extra": "^11.2.0",
