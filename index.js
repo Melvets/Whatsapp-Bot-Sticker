@@ -198,8 +198,26 @@ async function imageToWebpSticker(buffer, topText, bottomText) {
     // Render teks meme via SVG → PNG overlay, lalu composite dengan ffmpeg
     const overlayPath = path.join(CONFIG.tempFolder, `overlay_${Date.now()}.png`);
     const svg = buildMemeTextSvg(size, size, topText, bottomText);
-    const pngBuf = svgToPng(svg, size, size);
-    await fs.writeFile(overlayPath, pngBuf);
+    console.log('[DEBUG] topText:', topText, '| bottomText:', bottomText);
+    console.log('[DEBUG] SVG length:', svg.length);
+    try {
+      const pngBuf = svgToPng(svg, size, size);
+      console.log('[DEBUG] PNG overlay size:', pngBuf.length, 'bytes');
+      await fs.writeFile(overlayPath, pngBuf);
+    } catch (e) {
+      console.error('[DEBUG] svgToPng error:', e.message);
+      // Fallback: buat stiker tanpa teks
+      await new Promise((resolve, reject) => {
+        ffmpeg(tmpPng)
+          .outputOptions(['-vcodec', 'libwebp', '-vf', `scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:-1:-1:color=black@0.0`, '-quality', '80'])
+          .toFormat('webp').save(tmpWebp)
+          .on('end', resolve).on('error', reject);
+      });
+      const result = await fs.readFile(tmpWebp);
+      await fs.remove(tmpPng).catch(() => {});
+      await fs.remove(tmpWebp).catch(() => {});
+      return result;
+    }
 
     await new Promise((resolve, reject) => {
       ffmpeg(tmpPng)
