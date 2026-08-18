@@ -7,7 +7,6 @@ const {
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
-const Jimp = require('jimp');
 const ffmpeg = require('fluent-ffmpeg');
 const fs = require('fs-extra');
 const path = require('path');
@@ -179,44 +178,37 @@ function buildMemeTextSvg(width, height, topText, bottomText) {
 // ==== KONVERSI GAMBAR KE WEBP (STIKER STATIS) + TEKS OPSIONAL ====
 async function imageToWebpSticker(buffer, topText, bottomText) {
   const size = 512;
-
-  // Load dan resize gambar dengan jimp
-  const image = await Jimp.read(buffer);
-  image.contain(size, size); // fit contain dengan padding transparan
-
-  if (topText || bottomText) {
-    // Render teks menggunakan jimp font bawaan
-    const font = await Jimp.loadFont(Jimp.FONT_SANS_32_WHITE);
-    const fontSmall = await Jimp.loadFont(Jimp.FONT_SANS_16_WHITE);
-
-    const drawText = async (text, isTop) => {
-      const upper = text.toUpperCase();
-      const textWidth = Jimp.measureText(font, upper);
-      const textHeight = Jimp.measureTextHeight(font, upper, size - 20);
-      const useFont = textWidth > size - 20 ? fontSmall : font;
-      const x = 10;
-      const y = isTop ? 10 : size - textHeight - 10;
-      image.print(useFont, x, y, { text: upper, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER }, size - 20, size);
-    };
-
-    if (topText) await drawText(topText, true);
-    if (bottomText) await drawText(bottomText, false);
-  }
-
-  // Konversi ke WebP via buffer PNG → ffmpeg tidak tersedia untuk statis,
-  // jimp tidak support webp output langsung — pakai temp PNG lalu ffmpeg
   const tmpPng = path.join(CONFIG.tempFolder, `img_${Date.now()}.png`);
   const tmpWebp = path.join(CONFIG.tempFolder, `img_${Date.now()}.webp`);
-  await image.writeAsync(tmpPng);
 
-  await new Promise((resolve, reject) => {
-    ffmpeg(tmpPng)
-      .outputOptions(['-vcodec', 'libwebp', '-quality', '80'])
-      .toFormat('webp')
-      .save(tmpWebp)
-      .on('end', resolve)
-      .on('error', reject);
-  });
+  // Load, resize, lalu simpan sebagai PNG dulu
+  const { Jimp } = require('jimp');
+  const image = await Jimp.read(buffer);
+  image.resize({ w: size, h: size });
+
+  if (topText || bottomText) {
+    // Jimp v1 tidak punya built-in text renderer yang mudah,
+    // overlay teks via drawtext FFmpeg saat konversi ke webp
+    await image.write(tmpPng);
+    const escapeFF = (s) => s.replace(/'/g, "\\'").replace(/:/g, '\\:');
+    const filters = [`scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:-1:-1:color=black@0.0`];
+    if (topText) filters.push(`drawtext=text='${escapeFF(topText.toUpperCase())}':fontcolor=white:fontsize=36:borderw=2:bordercolor=black:x=(w-text_w)/2:y=16`);
+    if (bottomText) filters.push(`drawtext=text='${escapeFF(bottomText.toUpperCase())}':fontcolor=white:fontsize=36:borderw=2:bordercolor=black:x=(w-text_w)/2:y=h-th-16`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(tmpPng)
+        .outputOptions(['-vcodec', 'libwebp', '-vf', filters.join(','), '-quality', '80'])
+        .toFormat('webp').save(tmpWebp)
+        .on('end', resolve).on('error', reject);
+    });
+  } else {
+    await image.write(tmpPng);
+    await new Promise((resolve, reject) => {
+      ffmpeg(tmpPng)
+        .outputOptions(['-vcodec', 'libwebp', '-quality', '80'])
+        .toFormat('webp').save(tmpWebp)
+        .on('end', resolve).on('error', reject);
+    });
+  }
 
   const result = await fs.readFile(tmpWebp);
   await fs.remove(tmpPng).catch(() => {});
@@ -228,60 +220,24 @@ async function imageToWebpSticker(buffer, topText, bottomText) {
 async function videoToWebpSticker(buffer, topText, bottomText) {
   const inputPath = path.join(CONFIG.tempFolder, `in_${Date.now()}`);
   const outputPath = path.join(CONFIG.tempFolder, `out_${Date.now()}.webp`);
-  // File PNG teks overlay (hanya dibuat kalau ada teks)
-  const overlayPath = path.join(CONFIG.tempFolder, `overlay_${Date.now()}.png`);
-  let hasOverlay = false;
 
   await fs.writeFile(inputPath, buffer);
 
-  // ==== Buat overlay PNG dari teks dengan jimp ====
-  if (topText || bottomText) {
-    const size = 512;
-    // Buat canvas transparan 512x512
-    const overlay = new Jimp(size, size, 0x00000000);
-    const font = await Jimp.loadFont(Jimp.FONT_SANS_32_WHITE);
-    const fontSmall = await Jimp.loadFont(Jimp.FONT_SANS_16_WHITE);
-
-    const drawText = async (text, isTop) => {
-      const upper = text.toUpperCase();
-      const textWidth = Jimp.measureText(font, upper);
-      const textHeight = Jimp.measureTextHeight(font, upper, size - 20);
-      const useFont = textWidth > size - 20 ? fontSmall : font;
-      const y = isTop ? 10 : size - textHeight - 10;
-      overlay.print(useFont, 10, y, { text: upper, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER }, size - 20, size);
-    };
-
-    if (topText) await drawText(topText, true);
-    if (bottomText) await drawText(bottomText, false);
-
-    await overlay.writeAsync(overlayPath);
-    hasOverlay = true;
-  }
+  const escapeFF = (s) => s.replace(/'/g, "\\'").replace(/:/g, '\\:');
 
   function buildFilters(fps) {
-    // Filter dasar: scale + fps + pad dengan background transparan
-    return `scale=512:512:force_original_aspect_ratio=decrease,fps=${fps},pad=512:512:-1:-1:color=white@0.0`;
+    const base = `scale=512:512:force_original_aspect_ratio=decrease,fps=${fps},pad=512:512:-1:-1:color=white@0.0`;
+    const parts = [base];
+    if (topText) parts.push(`drawtext=text='${escapeFF(topText.toUpperCase())}':fontcolor=white:fontsize=36:borderw=2:bordercolor=black:x=(w-text_w)/2:y=16`);
+    if (bottomText) parts.push(`drawtext=text='${escapeFF(bottomText.toUpperCase())}':fontcolor=white:fontsize=36:borderw=2:bordercolor=black:x=(w-text_w)/2:y=h-th-16`);
+    return parts.join(',');
   }
 
   async function runFfmpeg(fps, quality, duration) {
     await new Promise((resolve, reject) => {
-      const cmd = ffmpeg(inputPath).duration(duration);
-
-      if (hasOverlay) {
-        // Tambahkan overlay PNG sebagai input kedua, lalu composite di atas video
-        cmd.input(overlayPath);
-        cmd.outputOptions([
-          '-vcodec', 'libwebp',
-          '-filter_complex', `[0:v]${buildFilters(fps)}[base];[1:v]scale=512:512[txt];[base][txt]overlay=0:0`,
-          '-loop', '0',
-          '-preset', 'picture',
-          '-an',
-          '-vsync', '0',
-          '-quality', `${quality}`,
-          '-compression_level', '6',
-        ]);
-      } else {
-        cmd.outputOptions([
+      ffmpeg(inputPath)
+        .duration(duration)
+        .outputOptions([
           '-vcodec', 'libwebp',
           '-vf', buildFilters(fps),
           '-loop', '0',
@@ -290,10 +246,7 @@ async function videoToWebpSticker(buffer, topText, bottomText) {
           '-vsync', '0',
           '-quality', `${quality}`,
           '-compression_level', '6',
-        ]);
-      }
-
-      cmd
+        ])
         .toFormat('webp')
         .save(outputPath)
         .on('end', resolve)
@@ -321,7 +274,6 @@ async function videoToWebpSticker(buffer, topText, bottomText) {
   const outputBuffer = await fs.readFile(outputPath);
   await fs.remove(inputPath).catch(() => {});
   await fs.remove(outputPath).catch(() => {});
-  if (hasOverlay) await fs.remove(overlayPath).catch(() => {});
 
   if (finalSize > maxSizeBytes) {
     console.warn(`⚠️ Stiker ${(finalSize / 1024).toFixed(0)}KB, batasnya 500KB loh ya cik 😹`);

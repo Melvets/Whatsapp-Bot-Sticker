@@ -12,7 +12,7 @@
     "@whiskeysockets/baileys": "^6.7.18",
     "fluent-ffmpeg": "^2.1.2",
     "fs-extra": "^11.2.0",
-    "jimp": "^0.22.12",
+    "jimp": "^1.6.0",
     "node-webpmux": "^3.2.1",
     "pino": "^9.2.0",
     "qrcode-terminal": "^0.12.0"
