@@ -88,13 +88,22 @@ const RATE_LIMIT = {
    npm start
    ```
 
-4. Scan QR code yang muncul di terminal menggunakan WhatsApp:
+4. Login ke WhatsApp (pilih salah satu mode di `CONFIG.usePairingCode`):
+
+   **Mode Pairing Code (default, `usePairingCode: true`):**
+   - Bot akan meminta nomor HP kamu di terminal
+   - Masukkan nomor dengan kode negara, tanpa `+` (contoh: `6281234567890`)
+   - Buka WhatsApp → **Perangkat Tertaut** → **Tautkan dengan nomor telepon**
+   - Masukkan kode pairing yang muncul di terminal
+
+   **Mode QR Code (`usePairingCode: false`):**
+   - QR code akan muncul di terminal
    - Buka WhatsApp → **Perangkat Tertaut** → **Tautkan Perangkat**
    - Arahkan kamera ke QR code di terminal
 
-5. Setelah scan berhasil, terminal akan menampilkan:
+5. Setelah login berhasil, terminal akan menampilkan:
    ```
-   ✅ Bot siap digunakan!
+   ✅ Bot dah siap boss!
    ```
 
 > **Catatan:** Sesi login tersimpan di folder `auth_info`. Untuk logout/reset, hapus folder tersebut lalu restart bot.
@@ -106,9 +115,10 @@ const RATE_LIMIT = {
 | Package | Kegunaan |
 |---|---|
 | `@whiskeysockets/baileys` | Library WhatsApp Web API |
+| `@hapi/boom` | HTTP error handling (dipakai Baileys) |
 | `sharp` | Konversi dan resize gambar ke WebP |
 | `fluent-ffmpeg` | Konversi video/GIF ke WebP animasi |
-| `@ffmpeg-installer/ffmpeg` | Binary FFmpeg otomatis |
+| `@ffmpeg-installer/ffmpeg` | Binary FFmpeg otomatis (PC/server) |
 | `node-webpmux` | Inject metadata ke file WebP |
 | `qrcode-terminal` | Tampilkan QR code di terminal |
 | `fs-extra` | Utilitas file system |
