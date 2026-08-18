@@ -3,3 +3,4 @@ auth_info/
 temp/
 .env
 *.log
+*.backup

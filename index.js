@@ -96,15 +96,18 @@ function escapeFF(s) {
 
 // ==== HELPER: build drawtext filter untuk teks atas dan bawah ====
 function buildDrawtextFilter(topText, bottomText, extraFilters) {
+  // Path font Anton (mirip Impact, open source dari Google Fonts)
+  const fontPath = path.join(__dirname, 'fonts', 'Anton-Regular.ttf').replace(/\\/g, '/');
+  const fontOpt = `fontfile='${fontPath}'`;
   const parts = extraFilters ? [extraFilters] : [];
   if (topText) {
     parts.push(
-      `drawtext=text='${escapeFF(topText.toUpperCase())}':fontcolor=white:fontsize=48:borderw=3:bordercolor=black:x=(w-text_w)/2:y=20:font=serif`
+      `drawtext=${fontOpt}:text='${escapeFF(topText.toUpperCase())}':fontcolor=white:fontsize=60:borderw=3:bordercolor=black:x=(w-text_w)/2:y=20`
     );
   }
   if (bottomText) {
     parts.push(
-      `drawtext=text='${escapeFF(bottomText.toUpperCase())}':fontcolor=white:fontsize=48:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-text_h-20:font=serif`
+      `drawtext=${fontOpt}:text='${escapeFF(bottomText.toUpperCase())}':fontcolor=white:fontsize=60:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-text_h-20`
     );
   }
   return parts.join(',');
