@@ -3,6 +3,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   downloadMediaMessage,
+  Browsers,
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
@@ -12,6 +13,11 @@ const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const fs = require('fs-extra');
 const path = require('path');
 const webpmux = require('node-webpmux');
+const readline = require('readline');
+
+// ==== HELPER INPUT DARI TERMINAL ====
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -23,6 +29,15 @@ const CONFIG = {
   maxVideoDurationSec: 10,
   authFolder: path.join(__dirname, 'auth_info'),
   tempFolder: path.join(__dirname, 'temp'),
+
+  // ==== LOGIN ====
+  // true  -> login pakai nomor telepon (pairing code, tanpa scan QR)
+  // false -> login pakai scan QR code (default lama)
+  usePairingCode: true,
+  // Isi nomor WhatsApp di sini pakai kode negara, TANPA + / spasi / strip.
+  // Contoh Indonesia: '6281234567890'
+  // Kalau dikosongkan (''), bot akan tanya nomornya lewat terminal saat start.
+  phoneNumber: '',
 };
 
 fs.ensureDirSync(CONFIG.tempFolder);
@@ -172,29 +187,47 @@ async function imageToWebpSticker(buffer, topText, bottomText) {
 async function videoToWebpSticker(buffer, topText, bottomText) {
   const inputPath = path.join(CONFIG.tempFolder, `in_${Date.now()}`);
   const outputPath = path.join(CONFIG.tempFolder, `out_${Date.now()}.webp`);
+  // File PNG teks overlay (hanya dibuat kalau ada teks)
+  const overlayPath = path.join(CONFIG.tempFolder, `overlay_${Date.now()}.png`);
+  let hasOverlay = false;
 
   await fs.writeFile(inputPath, buffer);
 
-  const escapeFF = (s) => s.replace(/:/g, '\\:').replace(/'/g, "\\'");
+  // ==== Buat overlay PNG dari SVG (sama persis dengan stiker gambar) ====
+  if (topText || bottomText) {
+    const size = 512;
+    const svg = buildMemeTextSvg(size, size, topText, bottomText);
+    await sharp(Buffer.from(svg))
+      .resize(size, size)
+      .png()
+      .toFile(overlayPath);
+    hasOverlay = true;
+  }
 
   function buildFilters(fps) {
-    const filters = [
-      `scale=512:512:force_original_aspect_ratio=decrease,fps=${fps},pad=512:512:-1:-1:color=white@0.0`,
-    ];
-    if (topText) {
-      filters.push(`drawtext=text='${escapeFF(topText.toUpperCase())}':fontcolor=white:fontsize=48:borderw=3:bordercolor=black:x=(w-text_w)/2:y=20`);
-    }
-    if (bottomText) {
-      filters.push(`drawtext=text='${escapeFF(bottomText.toUpperCase())}':fontcolor=white:fontsize=48:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-th-20`);
-    }
-    return filters.join(',');
+    // Filter dasar: scale + fps + pad dengan background transparan
+    return `scale=512:512:force_original_aspect_ratio=decrease,fps=${fps},pad=512:512:-1:-1:color=white@0.0`;
   }
 
   async function runFfmpeg(fps, quality, duration) {
     await new Promise((resolve, reject) => {
-      ffmpeg(inputPath)
-        .duration(duration)
-        .outputOptions([
+      const cmd = ffmpeg(inputPath).duration(duration);
+
+      if (hasOverlay) {
+        // Tambahkan overlay PNG sebagai input kedua, lalu composite di atas video
+        cmd.input(overlayPath);
+        cmd.outputOptions([
+          '-vcodec', 'libwebp',
+          '-filter_complex', `[0:v]${buildFilters(fps)}[base];[1:v]scale=512:512[txt];[base][txt]overlay=0:0`,
+          '-loop', '0',
+          '-preset', 'picture',
+          '-an',
+          '-vsync', '0',
+          '-quality', `${quality}`,
+          '-compression_level', '6',
+        ]);
+      } else {
+        cmd.outputOptions([
           '-vcodec', 'libwebp',
           '-vf', buildFilters(fps),
           '-loop', '0',
@@ -203,7 +236,10 @@ async function videoToWebpSticker(buffer, topText, bottomText) {
           '-vsync', '0',
           '-quality', `${quality}`,
           '-compression_level', '6',
-        ])
+        ]);
+      }
+
+      cmd
         .toFormat('webp')
         .save(outputPath)
         .on('end', resolve)
@@ -231,6 +267,7 @@ async function videoToWebpSticker(buffer, topText, bottomText) {
   const outputBuffer = await fs.readFile(outputPath);
   await fs.remove(inputPath).catch(() => {});
   await fs.remove(outputPath).catch(() => {});
+  if (hasOverlay) await fs.remove(overlayPath).catch(() => {});
 
   if (finalSize > maxSizeBytes) {
     console.warn(`⚠️ Stiker ${(finalSize / 1024).toFixed(0)}KB, batasnya 500KB loh ya cik 😹`);
@@ -284,8 +321,41 @@ async function startBot() {
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: true,
+    // Kalau pakai pairing code, QR di terminal dimatikan (gak kepake)
+    printQRInTerminal: !CONFIG.usePairingCode,
+    browser: Browsers.ubuntu('Chrome'),
   });
+
+  // ==== LOGIN PAKAI NOMOR TELEPON (PAIRING CODE) ====
+  // Cuma jalan kalau belum pernah login sebelumnya (belum ada sesi tersimpan)
+  // Flag ini mencegah requestPairingCode dipanggil lebih dari satu kali
+  // meskipun startBot() dipanggil berulang saat reconnect
+  let pairingCodeRequested = false;
+
+  if (CONFIG.usePairingCode && !sock.authState.creds.registered) {
+    let nomor = CONFIG.phoneNumber?.trim();
+    if (!nomor) {
+      nomor = await question('📱 Masukkan nomor WhatsApp bot (contoh: 6281234567890): ');
+      nomor = nomor.trim();
+    }
+    nomor = nomor.replace(/[^0-9]/g, '');
+
+    // Request pairing code — dipanggil sekali saat event pertama masuk,
+    // flag mencegah duplikasi saat reconnect
+    sock.ev.on('connection.update', async (update) => {
+      if (!pairingCodeRequested && !sock.authState.creds.registered) {
+        pairingCodeRequested = true;
+        try {
+          const kodePairing = await sock.requestPairingCode(nomor);
+          console.log('🔗 Kode Pairing kamu: ' + kodePairing);
+          console.log('Buka WhatsApp di HP -> Perangkat Tertaut -> Tautkan dengan nomor telepon -> masukkan kode di atas.');
+        } catch (err) {
+          pairingCodeRequested = false;
+          console.error('❌ Gagal minta kode pairing:', err.message);
+        }
+      }
+    });
+  }
 
   sock.ev.on('creds.update', saveCreds);
 
