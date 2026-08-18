@@ -206,7 +206,7 @@ async function imageToWebpSticker(buffer, topText, bottomText) {
         .input(overlayPath)
         .outputOptions([
           '-vcodec', 'libwebp',
-          '-filter_complex', `[0:v]scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:-1:-1:color=black@0.0[base];[1:v][base]overlay=0:0`,
+          '-filter_complex', `[0:v]scale=${size}:${size}:force_original_aspect_ratio=decrease,pad=${size}:${size}:-1:-1:color=black@0.0[base];[1:v]scale=${size}:${size}[txt];[base][txt]overlay=0:0`,
           '-quality', '80',
         ])
         .toFormat('webp').save(tmpWebp)
