@@ -377,9 +377,22 @@ async function startBot() {
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
+  // Set untuk track message ID yang sudah diproses, cegah duplikat
+  const processedMsgIds = new Set();
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // Hanya proses pesan baru, bukan history sync
+    if (type !== 'notify') return;
+
     const msg = messages[0];
     if (!msg.message || msg.key.fromMe) return;
+
+    // Cegah pesan yang sama diproses dua kali (kadang Baileys kirim duplikat)
+    const msgId = msg.key.id;
+    if (processedMsgIds.has(msgId)) return;
+    processedMsgIds.add(msgId);
+    // Bersihkan set setelah 5 menit agar tidak makan memori
+    setTimeout(() => processedMsgIds.delete(msgId), 5 * 60 * 1000);
 
     try {
       const jid = msg.key.remoteJid;
